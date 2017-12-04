@@ -1,0 +1,1118 @@
+---
+title: "Projekt z analizy danych"
+author: "Szymon Roszyk"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    code_folding: hide
+    keep_md: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+    toc_float: yes
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+set.seed(1994)
+```
+ 
+# Podsumowanie
+
+Zbiór danych zawieraj¹cy informacje na temat wytworzonej energii przez ogniwa fotowoltaiczne umieszczone we W³oszech, zbierane przez dwa lata, oraz szczegó³owe informacje na temat warunków pogodowych panuj¹cych podczas pomiaru pozwalaj¹ na ustalenie jaki czynnik jest najwa¿niejszy dla iloœci wyprodukowanej energii.  
+Podczas analizy wczeœniej wspomnianego zbioru uda³o siê ustaliæ, ¿e najwa¿niejszym, czynnikiem wp³ywaj¹cym na iloœæ wyprodukowanej energii przez ogniwa fotowoltaiczne jest nas³onecznienie, czyli iloœæ promieni s³onecznych docieraj¹cych na ziemie. Istotne s¹ równie¿ data, wilgotnoœæ oraz lokalizacja, które wp³ywaj¹ na to jakie jest nas³onecznienie, a co za tym idzie ile energii s³onecznej uda siê przetworzyæ na elektryczn¹.  
+Z analizy wynik³o równie¿, ¿e wartoœci statystki lokalnej Morana I mog¹ pos³u¿yæ jako atrybuty, które pozwalaj¹ na wyznaczenie iloœci wyprodukowanej energii. Same wartoœci PCNM nie nadaj¹ siê do stworzenia regresora, co by³o dosyæ oczywiste ze wzglêdu na brak korelacji z iloœci¹ wyprodukowanej energii. 
+
+***
+
+# Wykorzystane biblioteki
+
+```{r biblioteki,results='hide',message=FALSE,warning=FALSE,echo=TRUE}
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(rmarkdown)
+library(ggplot2)
+library(corrplot)
+library(plotly)
+library(caret)
+```
+
+Do utworzenia tego dokumentu zosta³y wykorzystane nastêpuj¹ce biblioteki do jêzyka programowania R: 
+
+1. *dplyr* - do przetwarzania danych
+2. *knitr* - do wygenerowania tabel
+3. *kableExtra* - do poprawienia wygl¹du tabel
+4. *rmarkdown* - do zarz¹dzania blokami kodu w raporcie
+5. *ggplot2* - do tworzenia statycznych wykresów
+6. *corrplot* - do stworzenia tabelek z korelacjami atrybutów
+7. *plotly* - do stworzenia interkatywnych wykresów oraz animacji
+8. *caret* - do stworzenia regresora 
+
+***
+
+# Wczytywanie danych
+
+```{r wczytywanieDanych, echo=TRUE}
+powerplants<- read.csv("elektrownie.csv",header = TRUE,sep = ",")
+```
+
+Surowe dane wczytywane s¹ z pliku *elektrownie.csv*.
+
+***
+
+# Czyszczenie danych
+
+```{r czyszczenieDanych,echo=TRUE}
+powerplants <- powerplants%>%
+   select(-icon,-(anno:ora))%>%
+  rename(id_jednostki=idsito,
+         id_modelu=idmodel,
+         id_marki=idbrand,
+         szerokosc_geograficzna=lat,
+         dlugosc_geograficzna = lon,
+         wiek_w_miesiacach = ageinmonths,
+         temperatura_powietrza=temperatura_ambiente,
+         naslonecznienie=irradiamento,
+         cisnienie=pressure,
+         predkosc_wiatru=windspeed,
+         wilgotnosc=humidity,
+         punkt_rosy=dewpoint,
+         kierunek_wiatru = windbearing,
+         zachmurzenie=cloudcover,
+         wysokosc_slonca = altitude,
+         azymut_slonca= azimuth,
+         dystans = dist,
+         naslonecznienie_pvgis = irr_pvgis_mod,
+         temperatura_powietrza_I= tempi,
+         naslonecznienie_I = irri,
+         cisnienie_I = pressurei,
+         predkosc_wiatru_I = windspeedi,
+         wilgotnosc_I = humidityi,
+         punkt_rosy_I = dewpointi,
+         kierunek_wiatru_I = windbearingi,
+         zachmurzenie_I = cloudcoveri,
+         wysokosc_slonca_I = altitudei,
+         azymut_slonca_I = azimuthi,
+         naslonecznienie_pvgis_I = irri_pvgis_mod
+         )%>%
+  mutate(data=gsub("/",".",data))%>%
+  mutate(godzina = as.integer(format(as.POSIXlt(data,format="%m.%d.%Y %H:%M"), "%H")),dzien = as.integer(format(as.POSIXlt(data,format="%m.%d.%Y %H:%M"), "%d")),miesiac = as.integer(format(as.POSIXlt(data,format="%m.%d.%Y %H:%M"), "%m")),rok = as.integer(format(as.POSIXlt(data,format="%m.%d.%Y %H:%M"), "%Y")))%>%
+  mutate(data_format = as.Date(data,format = "%m.%d.%Y"))%>%mutate(data_wartosc = as.numeric(as.POSIXct(data,format="%m.%d.%Y %H:%M",tz="GMT")))
+units_ids <- sort(distinct(powerplants,id_jednostki)$id_jednostki)
+model_ids <- sort(distinct(powerplants,id_modelu)$id_modelu)
+brand_ids <- sort(distinct(powerplants,id_marki)$id_marki)
+powerplants <- powerplants%>% mutate(id_lokalizacji = paste(szerokosc_geograficzna,dlugosc_geograficzna,sep=";"))
+localization_ids <- sort(distinct(powerplants,id_lokalizacji)$id_lokalizacji)
+  
+powerplants<-powerplants %>% mutate(id_jednostki = match(id_jednostki,units_ids),
+                                    id_modelu = match(id_modelu,model_ids),
+                                    id_marki = match(id_marki,brand_ids),
+                                    id_lokalizacji = match(id_lokalizacji,localization_ids))%>%
+                             select(-szerokosc_geograficzna,-dlugosc_geograficzna)
+
+```
+
+
+Wczytane surowe dane zostaj¹ poddane przetwarzaniu, maj¹cego na celu wyczszczenie danych oraz dostoswanie ich do dalszej analizy. Operacje jakie wykonano na wyczyszczonych danych s¹ nastêpuj¹ce: 
+
+1. Usuniêto kolumny *anno*, *ora*, *day* oraz *icon*
+2. Zmieniono nazwy kolumn w taki sposób aby ich nazwy odpowiada³y danym, jakie s¹ w nich zawarte 
+    + idsito - id_jednostki 
+    + idmodel - id_modelu 
+    + idbrand - id_marki 
+    + ageinmonths - wiek_w_miesiacach 
+    + temperatura_ambient - temperatura_powietrza 
+    + irradiamento - naslonecznienie 
+    + pressure - cisnienie 
+    + windspeed - predkosc_wiatru 
+    + humidity - wilgotnosc 
+    + punkt_rosy - dewpoint 
+    + windbearing - kierunek_wiatru 
+    + cloudcover - zachmurzenie 
+    + altitude - wysokosc_slonca 
+    + azimuth - azymut_slonca 
+    + dist - dystans 
+    + irr_pvgis_mod - naslonecznienie_pvgis 
+    + wszystkim zmiennym z sufixem "i" analogicznie zmieniono nazwy i dodano sufix "I" 
+3. Format w kolumnie *data* uwspólniono na *MM.dd.YYYY hh:mm*
+4. Dodano kolumny *godzina*, *dzien*, *miesiac*, *rok* zawieraj¹ce dane kolejno wartoœci godziny, dnia, miesi¹ca i roku z wartoœci z kolumny *data*
+5. Kolumny *lat* i *lon* usuniêto i wprowadzono now¹ kolumnê *id_lokalizacji* 
+6. Kolumny *id_jednostki*, *id_modelu*, *id_marki* przetworzono tak aby zawiera³y wartoœci ca³kowite zamiast liczb rzeczywistych
+7. Dodano kolumnê *data_wartosc* zawieraj¹c¹ datê w postaci liczby
+8. Dodano kolumnê *data_format* zawietj¹c¹ datê w formacie *MM.dd.YYY*
+
+Poni¿ej znajduje siê tabelka prezentuj¹ca piêæ pierwszych wierszy danych po wstêpnym przetworzeniu
+
+```{r tabelkaZDanychPrzetworzonymi, echo=TRUE}
+head(powerplants,5)
+```
+
+***
+
+#Przetwarzanie brakuj¹cych danych
+
+Po wstêpnej analizie danych okaza³o siê, ¿e czêœæ danych atrybutów *cisnienie* i *naslonecznienie* zawiera wartoœci puste w niektórych okresach czasu. Poni¿sze wykresy prezentuj¹ braki w danych dla atrybutów *cisnienie* i *naslonecznienie* dla przyk³adowych jednostek pomiarowych.
+
+```{r WykresyBrakDanych, echo=FALSE,fig.width=3.5, fig.height=3.5}
+p<-ggplot(powerplants%>%filter(id_jednostki == 1), aes(x=data_format,y=cisnienie)) + geom_point(color="blue") + theme_bw() + xlab("Data") + ylab("Cisnienie") + ggtitle("Jednostka nr 1")
+print(p)
+p<-ggplot(powerplants%>%filter(id_jednostki == 17), aes(x=data_format,y=naslonecznienie)) + geom_point(color="blue") + theme_bw() + xlab("Data") + ylab("Nas³onecznienie") + ggtitle("Jednostka nr 2")
+print(p)
+```
+
+```{r PrzetwarzanieBrakujacychDanych,echo=FALSE, message= FALSE, echo=TRUE}
+powerplants<-arrange(powerplants,rok,miesiac,dzien,godzina)
+#cisnienie
+help_df <- powerplants%>%filter(cisnienie>0)%>%group_by(data)%>%mutate(cisnienie_avg=mean(cisnienie))%>%distinct(data,cisnienie_avg)
+powerplants <-powerplants%>%left_join(help_df)%>%mutate(cisnienie=if_else(cisnienie==0,cisnienie_avg,cisnienie))%>%select(-cisnienie_avg) 
+
+#naslonecznienie
+miising_irradiation <- function(df){
+   id <- distinct(select(df,id_jednostki))$id_jednostki;
+   if(id == 4){
+    rows_to_replace <- df$data_format>=as.Date("01.01.2012",format = "%m.%d.%Y") & df$data_format<as.Date("04.01.2012",format="%m.%d.%Y") & df$id_jednostki == id;
+    
+    correct_rows <- df$data_format>=as.Date("01.01.2013",format = "%m.%d.%Y") & df$data_format<as.Date("04.01.2013",format="%m.%d.%Y") & df$id_jednostki == id;
+   }
+    if(id == 17){
+    rows_to_replace <- df$data_format>=as.Date("06.01.2013",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2014",format="%m.%d.%Y") & df$id_jednostki == id;
+    
+    correct_rows <- df$data_format>=as.Date("06.01.2012",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2013",format="%m.%d.%Y") & df$id_jednostki == id;
+    }
+   if(id==4 | id == 17){
+       df[rows_to_replace,"naslonecznienie"] <-  df[correct_rows,"naslonecznienie"]; 
+   }
+   return(df);
+}
+powerplants<-powerplants%>%group_by(id_jednostki)%>%do(as.data.frame(miising_irradiation(.)))%>%ungroup()
+
+#kwh
+mean_kwh <- powerplants%>%filter(id_jednostki != 1 & id_jednostki != 2 & id_jednostki != 3 & id_jednostki != 4 & id_jednostki != 17)%>%group_by(data)%>%mutate(m_kwh = mean(kwh))%>%ungroup()
+mean_kwh <-select(mean_kwh,data_format,data,m_kwh)
+
+missing_kwh <- function(df,mdf){
+  id <- distinct(select(df,id_jednostki))$id_jednostki;
+  if(id == 1 | id == 2 |id == 3 |id == 4 |id == 17 ){
+      rows_to_replace <- df$data_format>=as.Date("01.01.2013",format = "%m.%d.%Y") & df$data_format<as.Date("02.01.2013",format="%m.%d.%Y") & df$id_jednostki == id;
+       df[rows_to_replace,"kwh"] <-  mdf[rows_to_replace,"m_kwh"];
+  }
+    if(id == 16){
+      rows_to_replace <- df$data_format>=as.Date("08.01.2013",format = "%m.%d.%Y") & df$data_format<as.Date("09.01.2013",format="%m.%d.%Y") & df$id_jednostki == id;
+      df[rows_to_replace,"kwh"] <-  mdf[rows_to_replace,"m_kwh"];
+  }
+  return(df)
+}
+powerplants<-powerplants%>%group_by(id_jednostki)%>%do(as.data.frame(missing_kwh(.,mean_kwh)))%>%ungroup()
+
+```
+
+
+Wszystkie wartoœci ciœnienia, których wartoœæ by³a równa 0 podmieniono na œredni¹ wartoœæ ciœnienia obliczon¹ dla danego punkty czasowego (dnia, godziny, miesi¹ca, roku) ze wszystkich niezerowych wartoœci ciœnienia w pozosta³ych jednostkach.   
+Brakuj¹ce dane nas³onecznienia dotyczy³y tylko niewielkich fragmentów danych oraz dodatkowo wartoœæ nas³onecznienia równa zero by³a wartoœci¹ prawid³ow¹ dla godzin nocnych oraz dni z wysokim zachmurzeniem. W zwi¹zku z tym zdecydowano, ¿e fragmenty z brakuj¹cymi danymi nas³onecznienia zostan¹ uzupe³nione wartoœciami z analogicznego okresu z roku poprzedniego lub przysz³ego.  
+Równie¿ atrybut *kwh* wymaga³ dla niektórych jednostek usuniêcia wartoœci zerowych poprzez podmienienie wartoœci 0 œredni¹ policzon¹ dla tego samego okresu dla czujników gdzie wartoœci zero nie wystêpowa³y.
+
+***
+
+#Przetwarzanie danych nieprawid³owych
+
+Podczas dalszej analizy danych odnaleziono okresu czasu, gdzie dane zgromadzone przez czujniki wygl¹da³y na nieprwid³owe. Poni¿szy wykres pokazuje nieprawid³owe dane dla atrybutu *temperatura_powietrza* gdzie w grudniu temperatura powietrza by³a wy¿sza niæ w lipcu. Dodatkowo reguralnoœæ tych danych wskazuje na ich nieprawid³owoœæ. 
+
+```{r TempWykres, echo=FALSE}
+p<-ggplot(powerplants%>%filter(id_jednostki == 5), aes(x=data_format,y=temperatura_powietrza)) + geom_point(color="blue") + theme_bw() + xlab("Data") + ylab("Temperatura powietrza") + ggtitle("Jednostka nr 5")
+print(p)
+```
+
+```{r poprawianieDanych,echo=TRUE}
+correct_standard_data <- function(df){
+  id <- distinct(select(df,id_jednostki))$id_jednostki;
+  if(id == 5 | id == 6 | id == 7 | id == 11){
+    rows_to_replace <- df$data_format>=as.Date("07.01.2013",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2014",format="%m.%d.%Y") & df$id_jednostki == id;
+    
+    correct_rows <- df$data_format>=as.Date("07.01.2012",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2013",format="%m.%d.%Y") & df$id_jednostki == id;
+  }
+  if(id == 10){
+    rows_to_replace <- df$data_format>=as.Date("07.01.2012",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2013",format="%m.%d.%Y") & df$id_jednostki == id;
+    
+    correct_rows <- df$data_format>=as.Date("07.01.2013",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2014",format="%m.%d.%Y") & df$id_jednostki == id;
+  }
+  if(id==13 | id == 15 | id == 16){
+    rows_to_replace <- df$data_format>=as.Date("10.01.2013",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2014",format="%m.%d.%Y") & df$id_jednostki == id;
+    
+    correct_rows <- df$data_format>=as.Date("10.01.2012",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2013",format="%m.%d.%Y") & df$id_jednostki == id;
+  }
+  if(id == 5 | id == 6 | id == 7 | id == 11 | id ==10 | id == 13 | id == 15 | id == 16){
+      df[rows_to_replace,"temperatura_powietrza"] <-  df[correct_rows,"temperatura_powietrza"];
+      df[rows_to_replace,"naslonecznienie"] <-  df[correct_rows,"naslonecznienie"];
+      df[rows_to_replace,"cisnienie"] <-  df[correct_rows,"cisnienie"];
+      df[rows_to_replace,"predkosc_wiatru"] <-  df[correct_rows,"predkosc_wiatru"];
+      df[rows_to_replace,"wilgotnosc"] <-  df[correct_rows,"wilgotnosc"];
+      df[rows_to_replace,"punkt_rosy"] <-  df[correct_rows,"punkt_rosy"];
+      df[rows_to_replace,"kierunek_wiatru"] <-  df[correct_rows,"kierunek_wiatru"];
+      df[rows_to_replace,"zachmurzenie"] <-  df[correct_rows,"zachmurzenie"];
+      df[rows_to_replace,"wysokosc_slonca"] <-  df[correct_rows,"wysokosc_slonca"];
+      df[rows_to_replace,"azymut_slonca"] <-  df[correct_rows,"azymut_slonca"];
+      df[rows_to_replace,"dystans"] <-  df[correct_rows,"dystans"];
+      df[rows_to_replace,"naslonecznienie_pvgis"] <-  df[correct_rows,"naslonecznienie_pvgis"];
+      df[rows_to_replace,"kwh"] <-  df[correct_rows,"kwh"];
+  }
+
+  return(df);
+}
+
+powerplants<-arrange(powerplants,rok,miesiac,dzien,godzina)
+powerplants<-powerplants%>%group_by(id_jednostki)%>%do(as.data.frame(correct_standard_data(.)))%>%ungroup()
+
+correct_I_data <- function(df){
+  id <- distinct(select(df,id_jednostki))$id_jednostki;
+  if(id == 5 | id == 11 | id == 13 ){
+    rows_to_replace <- df$data_format>=as.Date("07.01.2013",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2014",format="%m.%d.%Y") & df$id_jednostki == id;
+    
+    correct_rows <- df$data_format>=as.Date("07.01.2012",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2013",format="%m.%d.%Y") & df$id_jednostki == id;
+  }
+  if(id == 10){
+    rows_to_replace <- df$data_format>=as.Date("07.01.2012",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2013",format="%m.%d.%Y") & df$id_jednostki == id;
+    
+    correct_rows <- df$data_format>=as.Date("07.01.2013",format = "%m.%d.%Y") & df$data_format<as.Date("01.01.2014",format="%m.%d.%Y") & df$id_jednostki == id;
+  }
+  if(id == 5 | id == 10 | id == 11 | id == 13 ){
+      df[rows_to_replace,"temperatura_powietrza_I"] <-  df[correct_rows,"temperatura_powietrza_I"];
+      df[rows_to_replace,"naslonecznienie_I"] <-  df[correct_rows,"naslonecznienie_I"];
+      df[rows_to_replace,"cisnienie_I"] <-  df[correct_rows,"cisnienie_I"];
+      df[rows_to_replace,"predkosc_wiatru_I"] <-  df[correct_rows,"predkosc_wiatru_I"];
+      df[rows_to_replace,"wilgotnosc_I"] <-  df[correct_rows,"wilgotnosc_I"];
+      df[rows_to_replace,"punkt_rosy_I"] <-  df[correct_rows,"punkt_rosy_I"];
+      df[rows_to_replace,"kierunek_wiatru_I"] <-  df[correct_rows,"kierunek_wiatru_I"];
+      df[rows_to_replace,"zachmurzenie_I"] <-  df[correct_rows,"zachmurzenie_I"];
+      df[rows_to_replace,"wysokosc_slonca_I"] <-  df[correct_rows,"wysokosc_slonca_I"];
+      df[rows_to_replace,"azymut_slonca_I"] <-  df[correct_rows,"azymut_slonca_I"];
+      df[rows_to_replace,"naslonecznienie_pvgis_I"] <-  df[correct_rows,"naslonecznienie_pvgis_I"];
+  }
+
+  return(df);
+}
+
+powerplants<-arrange(powerplants,rok,miesiac,dzien,godzina)
+powerplants<-powerplants%>%group_by(id_jednostki)%>%do(as.data.frame(correct_I_data(.)))%>%ungroup()
+
+#Poprawianie danych gdzie byla jedna ciagla linia
+one_line_row<-powerplants$id_jednostki ==6 | powerplants$id_jednostki ==7 | powerplants$id_jednostki ==12 
+helper <- powerplants%>%filter(id_jednostki != 6 & id_jednostki != 7 & id_jednostki !=12)%>%group_by(rok,miesiac,dzien,godzina)
+powerplants[one_line_row,"temperatura_powietrza_I"] <-helper%>%summarise(srednia = mean(temperatura_powietrza_I))%>%ungroup()%>%select(srednia)
+powerplants[one_line_row,"naslonecznienie_I"] <-helper%>%summarise(srednia = mean(naslonecznienie_I))%>%ungroup()%>%select(srednia)
+powerplants[one_line_row,"cisnienie_I"] <-helper%>%summarise(srednia = mean(cisnienie_I))%>%ungroup()%>%select(srednia)
+powerplants[one_line_row,"predkosc_wiatru_I"] <-helper%>%summarise(srednia = mean(predkosc_wiatru_I))%>%ungroup()%>%select(srednia)
+powerplants[one_line_row,"wilgotnosc_I"] <-helper%>%summarise(srednia = mean(wilgotnosc_I))%>%ungroup()%>%select(srednia)
+powerplants[one_line_row,"punkt_rosy_I"] <-helper%>%summarise(srednia = mean(punkt_rosy_I))%>%ungroup()%>%select(srednia)
+powerplants[one_line_row,"kierunek_wiatru_I"] <-helper%>%summarise(srednia = mean(kierunek_wiatru_I))%>%ungroup()%>%select(srednia)
+powerplants[one_line_row,"zachmurzenie_I"] <-helper%>%summarise(srednia = mean(zachmurzenie_I))%>%ungroup()%>%select(srednia)
+powerplants[one_line_row,"wysokosc_slonca_I"] <-helper%>%summarise(srednia = mean(wysokosc_slonca_I))%>%ungroup()%>%select(srednia)
+powerplants[one_line_row,"azymut_slonca_I"] <-helper%>%summarise(srednia = mean(azymut_slonca_I))%>%ungroup()%>%select(srednia)
+powerplants[one_line_row,"naslonecznienie_pvgis_I"] <-helper%>%summarise(srednia = mean(naslonecznienie_pvgis_I))%>%ungroup()%>%select(srednia)
+```
+
+Podobne nieprawid³owoœci wystêpowa³y dla wszystkich atrybutów, poza atrybutami dotycz¹cymi daty, czasu, identyfikatorów i atrybutów *pcnm*. W zwi¹zku z tak licznymi nieprawid³owoœciami postanowiono nieprawid³owe dane podmieniæ na dane prawid³owe z analogicznego okresu z roku poprzedniego lub przysz³ego. 
+
+***
+
+#Informacje na temat zbioru ("Codebook")
+
+Dane w zbiorze maj¹ nastêpuj¹ce znaczenie: 
+
+* *id* - unikalny identyfikator 
+* *id_jednostki* - identyfikator czujnika pomiarowego 
+* *id_modelu* - identyfikator modelu panelu s³oneczego na którym wykonano pomiar 
+* *id_marki* - identyfikator marki panelu s³oneczego na którym wykonano pomiar 
+* *id_lokalizacji* - identyfikator lokalizacji 
+* *wiek_w_miesi¹cach* - znormalizowana od 0 do 1 wartoœæ wieku panelu na którym wykonywana pomiar 
+* *rok* - rok przeprowadzenia pomiaru 
+* *miesi¹c* - miesi¹c przeprowadzenia pomiaru 
+* *dzien* - dzieñ przeprowadzenia pomiaru 
+* *godzina* - godzina przeprowadzenia pomiaru 
+* *data* - data i godzina przeprowadzenia pomiaru w formacie *MM.dd.yyyy hh:mm* 
+* *data_format* - data w formacie *MM.dd.yyyy* 
+* *data_wartoœæ* - wartoœæ liczbowa reprezentuj¹ca datê i czas 
+* *temperatura_powietrza* - znormalizowana od 0 do 1 temperatura powietrza 
+* *naslonecznienie* - znormalizowana od 0 do 1 wartoœæ promieni s³onecznych docieraj¹cych do ogniwa fotowoltaicznego 
+* *cisnienie* - znormalizowana od 0 do 1 wartoœæ ciœnienia 
+* *predkosc_wiatru* - znormalizowana od 0 do 1 wartoœæ prêdkoœci wiatru 
+* *wilgotnosc* - znormalizowana od 0 do 1 wartoœæ wilgotnoœci powietrza 
+* *punkt_rosy* - znormalizowana od 0 do 1 wartoœæ punkty rosy 
+* *zachmurzenie* - znormalizowana od 0 do 1 wartoœæ zachmurzenia nieba 
+* *kierunek_wiatru* - znormalizowana od 0 do 1 wartoœæ okreœlaj¹ca kierunek wiatru
+* *dystans* - znormalizowana od 0 do 1 wartoœæ wskazuj¹ca odleg³oœæ od dnia 6 lipca.
+* *wysokosc_slonca* - znormalizowana od 0 do 1  wartoœæ odleg³oœci s³oñca od powierzchni ziemi 
+* *azymut_slonca* - znormalizowana od 0 do 1 wartoœæ k¹ta padania promieni s³onecznych 
+* *naslonecznienie_pvgis* - znormalizowana od 0 do 1 wartoœæ promieni s³onecznych pobrana z systemu PVGIS 
+* *kwh* - znormalizowana od 0 do 1 wartoœæ energii wyprodukowanej przez ogniowo fotowoltaiczne w danej godzinie w kWh 
+* *temperatura_powietrza_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *temperatura_powietrza* 
+* *naslonecznienie_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *naslonecznienie* 
+* *cisnienie_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *cisnienie* 
+* *predkosc_wiatru_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *predkosc_wiatru* 
+* *wilgotnosc_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *wilgotnosc* 
+* *punkt_rosy_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *punkt_rosy* 
+* *zachmurzenie_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *zachmurzenie* 
+* *kierunek_wiatru_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *kierunek_wiatru* 
+* *wysokosc_slonca_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *wysokosc_slonca* 
+* *azymut_slonca_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *azymut_slonca* 
+* *naslonecznienie_pvgis_I* - znormalizowana od 0 do 1 wartoœæ statystyki lokalnej *Morana I* obliczonej dla atrybutu *naslonecznienie_pvgis* 
+* atrybuty *pcnm1* - *pcnm15* - wartoœci wektora w³asnego maksymalizuj¹ce statystykê *Morana I* 
+
+***
+
+#Podstawowe statystki
+
+Poni¿ej przedstawiono informacjê na temat wielkoœci zbioru danych 
+
+```{r wielkoscZbiortuDanych,echo=TRUE}
+sizeInfo <- data.frame(observationNumber= nrow(powerplants), atributesNumber =ncol(powerplants))
+kable(sizeInfo,col.names=c("Liczba obserwacji","Liczba atrybutów"),align = "c")
+basicDataInfo <-data.frame(
+  unitsNumber = count(distinct(select(powerplants,id_jednostki))),
+    dayNumber = count(distinct(powerplants,rok,miesiac,dzien)),
+  dateSpan = paste("od",min(as.Date(powerplants$data,format = "%m.%d.%Y")),"do",max(as.Date(powerplants$data,format = "%m.%d.%Y")),sep = " "),
+  timeSpan = paste("od",min(powerplants$godzina),"do",max(powerplants$godzina),sep=" "),
+  localizationNumber = count(distinct(select(powerplants,id_lokalizacji))),
+  modelNumber = count(distinct(select(powerplants,id_modelu))),
+  brandNumber = count(distinct(select(powerplants,id_marki)))
+  )
+kable(basicDataInfo,col.names = c("Liczba czujników","Liczba dni","Okres badañ","Godziny badañ„","Liczba lokalizacji",
+                                         "Liczba modeli czujników","Liczba marek czujników"), align = "c")
+
+```
+
+***
+
+##Podstawowe statystki atrybutów
+
+Poni¿sza tabelka zawiera podstawowe statystki wyliczone dla ka¿dego atrybutu. Pominiêto atrybuty dotycz¹ce daty i identyfikatory. Jako, ¿e atrybuty z prefiksem "I" oraz atrybuty *pcnm* zawieraj¹ dane dotycz¹ce statystyki *Morana I* to dane zosta³y graficznie oddzielone. W dalszych czêœciach raportu atrybuty bêd¹ traktowane wed³ug podzia³u zaprezentowanego w tabelce.
+
+```{r tabelaZPodsumowaniem,echo=TRUE}
+summary_data <- powerplants%>%select(-id,-id_jednostki,-id_modelu,-id_marki,-data,-godzina,-dzien,-miesiac,-rok,-data_format,-data_wartosc,-id_lokalizacji)%>%
+  select(temperatura_powietrza,naslonecznienie,cisnienie,predkosc_wiatru,wilgotnosc,punkt_rosy,kierunek_wiatru,zachmurzenie,dystans,wysokosc_slonca,azymut_slonca,naslonecznienie_pvgis,kwh,
+         temperatura_powietrza_I,naslonecznienie_I,cisnienie_I,predkosc_wiatru_I,wilgotnosc_I,punkt_rosy_I,kierunek_wiatru_I,zachmurzenie_I,wysokosc_slonca_I,azymut_slonca_I,naslonecznienie_pvgis_I,
+         pcnm1:pcnm15)
+
+df_summarise_mean <- as.data.frame(t(summary_data%>%summarise_all( funs(mean))))
+df_summarise <- data.frame(rownames(df_summarise_mean));
+colnames(df_summarise_mean)<-c("srednia")
+rownames(df_summarise_mean)<-c()
+df_summarise<-cbind(df_summarise,df_summarise_mean$srednia)
+rownames(df_summarise)<-c()
+
+df_summarise_sd <- as.data.frame(t(summary_data%>%summarise_all( funs(sd))))
+colnames(df_summarise_sd)<-c("SD")
+rownames(df_summarise_sd)<-c()
+df_summarise<-cbind(df_summarise,df_summarise_sd$SD)
+rownames(df_summarise)<-c()
+
+df_summarise_var <- as.data.frame(t(summary_data%>%summarise_all( funs(var))))
+colnames(df_summarise_var)<-c("VAR")
+rownames(df_summarise_var)<-c()
+df_summarise<-cbind(df_summarise,df_summarise_var$VAR)
+rownames(df_summarise)<-c()
+
+df_summarise_max <- as.data.frame(t(summary_data%>%summarise_all( funs(max))))
+colnames(df_summarise_max)<-c("MAX")
+rownames(df_summarise_max)<-c()
+df_summarise<-cbind(df_summarise,df_summarise_max$MAX)
+rownames(df_summarise)<-c()
+
+df_summarise_min <- as.data.frame(t(summary_data%>%summarise_all( funs(min))))
+colnames(df_summarise_min)<-c("MIN")
+rownames(df_summarise_min)<-c()
+df_summarise<-cbind(df_summarise,df_summarise_min$MIN)
+rownames(df_summarise)<-c()
+
+df_summarise_median <- as.data.frame(t(summary_data%>%summarise_all( funs(median))))
+colnames(df_summarise_median)<-c("MEDIAN")
+rownames(df_summarise_median)<-c()
+df_summarise<-cbind(df_summarise,df_summarise_median$MEDIAN)
+rownames(df_summarise)<-c()
+
+
+kable(df_summarise,col.names = c("Atrybut","Œrednia","Odchylenie stand.","Wariancja","Max","Min","Mediana"),"html")%>%
+  kable_styling(bootstrap_options = c("striped", "hover"))%>%
+  row_spec(1:13,background = "#cce6ff")%>%
+  row_spec(14:24,background = "#ccffe6")%>%
+  row_spec(25:39,background = "#ffcccc")%>%
+  column_spec(1,bold = T)
+
+
+```
+
+***
+
+#Rozk³ad wartoœci atrybutów{.tabset}
+
+W poszczególnych zak³adkach przedstawiono wykresy prezentuj¹ce rozk³ady wartoœci dla ka¿dego atrybutu.
+
+##Dane klasyczne
+
+```{r FakeRozkladWartosciStandardWykres,eval=FALSE, echo=TRUE, results='hide',fig.height=2.7,fig.width=2.7}
+make_density_plot<-function(df,col,t){
+  p<-ggplot(df, aes(x=col)) + geom_density() + theme_bw() + xlab("") + ylab("") + ggtitle(t)
+  print(p)
+  return(df)
+}
+powerplants%>%do(make_density_plot(.,.$wiek_w_miesiacach,"wiek_w_miesiacach"))
+powerplants%>%do(make_density_plot(.,.$temperatura_powietrza,"temperatura_powietrza"))
+powerplants%>%do(make_density_plot(.,.$naslonecznienie,"naslonecznienie"))
+powerplants%>%do(make_density_plot(.,.$cisnienie,"cisnienie"))
+powerplants%>%do(make_density_plot(.,.$predkosc_wiatru,"predkosc_wiatru"))
+powerplants%>%do(make_density_plot(.,.$wilgotnosc,"wilgotnosc"))
+powerplants%>%do(make_density_plot(.,.$punkt_rosy,"punkt_rosy"))
+powerplants%>%do(make_density_plot(.,.$kierunek_wiatru,"kierunek_wiatru"))
+powerplants%>%do(make_density_plot(.,.$zachmurzenie,"zachmurzenie"))
+powerplants%>%do(make_density_plot(.,.$wysokosc_slonca,"wysokosc_slonca"))
+powerplants%>%do(make_density_plot(.,.$azymut_slonca,"azymut_slonca"))
+powerplants%>%do(make_density_plot(.,.$naslonecznienie_pvgis,"naslonecznienie_pvgis"))
+powerplants%>%do(make_density_plot(.,.$dystans,"dystans"))
+
+```
+
+```{r RozkladWartosciStandardWykres,echo=FALSE, results='hide',fig.height=2.7,fig.width=2.7}
+#Ten kod faktycznie wykonuje dane zadanie, a powy¿szy zosta³ dodany w celu wyœwietlenia kodu
+make_density_plot<-function(df,col,t){
+  p<-ggplot(df, aes(x=col)) + geom_density() + theme_bw() + xlab("") + ylab("") + ggtitle(t)
+  print(p)
+  return(df)
+}
+powerplants%>%do(make_density_plot(.,.$wiek_w_miesiacach,"wiek_w_miesiacach"))
+powerplants%>%do(make_density_plot(.,.$temperatura_powietrza,"temperatura_powietrza"))
+powerplants%>%do(make_density_plot(.,.$naslonecznienie,"naslonecznienie"))
+powerplants%>%do(make_density_plot(.,.$cisnienie,"cisnienie"))
+powerplants%>%do(make_density_plot(.,.$predkosc_wiatru,"predkosc_wiatru"))
+powerplants%>%do(make_density_plot(.,.$wilgotnosc,"wilgotnosc"))
+powerplants%>%do(make_density_plot(.,.$punkt_rosy,"punkt_rosy"))
+powerplants%>%do(make_density_plot(.,.$kierunek_wiatru,"kierunek_wiatru"))
+powerplants%>%do(make_density_plot(.,.$zachmurzenie,"zachmurzenie"))
+powerplants%>%do(make_density_plot(.,.$wysokosc_slonca,"wysokosc_slonca"))
+powerplants%>%do(make_density_plot(.,.$azymut_slonca,"azymut_slonca"))
+powerplants%>%do(make_density_plot(.,.$naslonecznienie_pvgis,"naslonecznienie_pvgis"))
+powerplants%>%do(make_density_plot(.,.$dystans,"dystans"))
+
+```
+
+##Dane statystki Morana I
+
+```{r FakeRozkladWartosciMoranIWykres, results='hide' ,echo=TRUE,eval=FALSE, results='hide',fig.height=2.7,fig.width=2.7}
+
+powerplants%>%do(make_density_plot(.,.$temperatura_powietrza_I,"temperatura_powietrza_I"))
+powerplants%>%do(make_density_plot(.,.$naslonecznienie_I,"naslonecznienie_I"))
+powerplants%>%do(make_density_plot(.,.$cisnienie_I,"cisnienie_I"))
+powerplants%>%do(make_density_plot(.,.$predkosc_wiatru_I,"predkosc_wiatru_I"))
+powerplants%>%do(make_density_plot(.,.$wilgotnosc_I,"wilgotnosc_I"))
+powerplants%>%do(make_density_plot(.,.$punkt_rosy_I,"punkt_rosy_I"))
+powerplants%>%do(make_density_plot(.,.$kierunek_wiatru_I,"kierunek_wiatru_I"))
+powerplants%>%do(make_density_plot(.,.$zachmurzenie_I,"zachmurzenie_I"))
+powerplants%>%do(make_density_plot(.,.$wysokosc_slonca_I,"wysokosc_slonca_I"))
+powerplants%>%do(make_density_plot(.,.$azymut_slonca_I,"azymut_slonca_I"))
+powerplants%>%do(make_density_plot(.,.$naslonecznienie_pvgis_I,"naslonecznienie_pvgis_I"))
+
+```
+
+```{r RozkladWartosciMoranIWykres, results='hide' ,echo=FALSE, results='hide',fig.height=2.7,fig.width=2.7}
+#Ten kod faktycznie wykonuje dane zadanie, a powy¿szy zosta³ dodany w celu wyœwietlenia kodu
+powerplants%>%do(make_density_plot(.,.$temperatura_powietrza_I,"temperatura_powietrza_I"))
+powerplants%>%do(make_density_plot(.,.$naslonecznienie_I,"naslonecznienie_I"))
+powerplants%>%do(make_density_plot(.,.$cisnienie_I,"cisnienie_I"))
+powerplants%>%do(make_density_plot(.,.$predkosc_wiatru_I,"predkosc_wiatru_I"))
+powerplants%>%do(make_density_plot(.,.$wilgotnosc_I,"wilgotnosc_I"))
+powerplants%>%do(make_density_plot(.,.$punkt_rosy_I,"punkt_rosy_I"))
+powerplants%>%do(make_density_plot(.,.$kierunek_wiatru_I,"kierunek_wiatru_I"))
+powerplants%>%do(make_density_plot(.,.$zachmurzenie_I,"zachmurzenie_I"))
+powerplants%>%do(make_density_plot(.,.$wysokosc_slonca_I,"wysokosc_slonca_I"))
+powerplants%>%do(make_density_plot(.,.$azymut_slonca_I,"azymut_slonca_I"))
+powerplants%>%do(make_density_plot(.,.$naslonecznienie_pvgis_I,"naslonecznienie_pvgis_I"))
+
+```
+
+##Dane PCNM
+
+```{r FakeRozkladWartosciPCNMWykres, results='hide',echo=TRUE,eval=FALSE, results='hide',fig.height=2.7,fig.width=2.7}
+powerplants%>%do(make_density_plot(.,.$pcnm1,"pcnm1"))
+powerplants%>%do(make_density_plot(.,.$pcnm2,"pcnm2"))
+powerplants%>%do(make_density_plot(.,.$pcnm3,"pcnm3"))
+powerplants%>%do(make_density_plot(.,.$pcnm4,"pcnm4"))
+powerplants%>%do(make_density_plot(.,.$pcnm5,"pcnm5"))
+powerplants%>%do(make_density_plot(.,.$pcnm6,"pcnm6"))
+powerplants%>%do(make_density_plot(.,.$pcnm7,"pcnm7"))
+powerplants%>%do(make_density_plot(.,.$pcnm8,"pcnm8"))
+powerplants%>%do(make_density_plot(.,.$pcnm9,"pcnm9"))
+powerplants%>%do(make_density_plot(.,.$pcnm10,"pcnm10"))
+powerplants%>%do(make_density_plot(.,.$pcnm11,"pcnm11"))
+powerplants%>%do(make_density_plot(.,.$pcnm12,"pcnm12"))
+powerplants%>%do(make_density_plot(.,.$pcnm13,"pcnm13"))
+powerplants%>%do(make_density_plot(.,.$pcnm14,"pcnm14"))
+powerplants%>%do(make_density_plot(.,.$pcnm15,"pcnm15"))
+```
+
+```{r RozkladWartosciPCNMWykres, results='hide',echo=FALSE, results='hide',fig.height=2.7,fig.width=2.7}
+powerplants%>%do(make_density_plot(.,.$pcnm1,"pcnm1"))
+powerplants%>%do(make_density_plot(.,.$pcnm2,"pcnm2"))
+powerplants%>%do(make_density_plot(.,.$pcnm3,"pcnm3"))
+powerplants%>%do(make_density_plot(.,.$pcnm4,"pcnm4"))
+powerplants%>%do(make_density_plot(.,.$pcnm5,"pcnm5"))
+powerplants%>%do(make_density_plot(.,.$pcnm6,"pcnm6"))
+powerplants%>%do(make_density_plot(.,.$pcnm7,"pcnm7"))
+powerplants%>%do(make_density_plot(.,.$pcnm8,"pcnm8"))
+powerplants%>%do(make_density_plot(.,.$pcnm9,"pcnm9"))
+powerplants%>%do(make_density_plot(.,.$pcnm10,"pcnm10"))
+powerplants%>%do(make_density_plot(.,.$pcnm11,"pcnm11"))
+powerplants%>%do(make_density_plot(.,.$pcnm12,"pcnm12"))
+powerplants%>%do(make_density_plot(.,.$pcnm13,"pcnm13"))
+powerplants%>%do(make_density_plot(.,.$pcnm14,"pcnm14"))
+powerplants%>%do(make_density_plot(.,.$pcnm15,"pcnm15"))
+```
+
+#Korelacja
+
+Poni¿sze wykresy prezentuj¹ korelacjê miêdzy poszczególnymi zmiennymi.
+
+```{r, Korelacja, fig.height=12,fig.width=12,echo=TRUE}
+standard_data_names<- colnames(powerplants%>%select(wiek_w_miesiacach,data_wartosc,godzina,dzien,miesiac,rok,temperatura_powietrza,naslonecznienie,cisnienie,predkosc_wiatru,wilgotnosc,punkt_rosy,kierunek_wiatru,zachmurzenie,dystans,azymut_slonca,wysokosc_slonca,naslonecznienie_pvgis,kwh))
+
+moran_i_data_names <- colnames(powerplants%>%select(temperatura_powietrza_I,naslonecznienie_I,cisnienie_I,predkosc_wiatru_I,wilgotnosc_I,punkt_rosy_I,kierunek_wiatru_I,zachmurzenie_I,azymut_slonca_I,wysokosc_slonca_I,naslonecznienie_pvgis_I,kwh))
+
+pcnm_data_names <- colnames(powerplants%>%select(pcnm1,pcnm2,pcnm3,pcnm4,pcnm5,pcnm6,pcnm7,pcnm8,pcnm9,pcnm10,pcnm11,pcnm12,pcnm13,pcnm14,pcnm15,kwh))
+
+M<-cor(powerplants%>%select(-data,-data_format))
+corrplot(M[standard_data_names,standard_data_names], method = "circle")
+corrplot(M[moran_i_data_names,moran_i_data_names], method = "circle")
+corrplot(M[pcnm_data_names,pcnm_data_names], method = "circle")
+corrplot(M[standard_data_names,moran_i_data_names], method = "circle")
+corrplot(M[standard_data_names,pcnm_data_names], method = "circle")
+corrplot(M[moran_i_data_names,pcnm_data_names], method = "circle")
+
+```
+
+Celem tego raportu jest ustalenie atrybutów, które wp³ywaj¹ na iloœæ produkowanej energii za pomoc¹ ogniw fotowoltaicznych, dlatego te¿ na poni¿szym wykresie przedstawiono atrybuty, które s¹ w najsilniejszej korelacji z atrybutem *kwh*
+
+```{r Top10Kwh,echo=TRUE}
+top_10_kwh <- as.data.frame(M["kwh",])
+top_10_kwh <- cbind(top_10_kwh,rownames(top_10_kwh))
+colnames(top_10_kwh)<-c("korelacja","atrybut")
+top_10_kwh<-arrange(top_10_kwh,desc(korelacja))
+top_10_kwh<- top_10_kwh%>%filter(atrybut!='kwh')
+top_10_kwh_1<-head(top_10_kwh,10)
+
+
+p<-ggplot(top_10_kwh_1,aes(x=reorder(atrybut,-korelacja),y=korelacja)) + geom_col(aes(fill=factor(korelacja))) + guides(fill=FALSE) + ggtitle("10 atrybutów najbardziej skorelowanych z atrybutem kwh") + xlab("") + ylab("Wspó³czynnik korelacji") + theme_bw()
+p<-p+theme(axis.text.x = element_text(angle = 90, hjust = 1))
+print(p)
+```
+
+Poni¿szy wykres prezentuje atrybuty, które s¹ w ujemnej korelacji z atrybutem *kwh*
+
+```{r Worst10Kwh,echo=TRUE}
+top_10_kwh_2<-tail(top_10_kwh,10)
+
+
+p<-ggplot(top_10_kwh_2,aes(x=reorder(atrybut,korelacja),y=korelacja)) + geom_col(aes(fill=factor(korelacja))) + guides(fill=FALSE) + ggtitle("10 atrybutów najmniej skorelowanych z atrybutem kwh") + xlab("") + ylab("Wspó³czynnik korelacji") + theme_bw()
+p<-p+theme(axis.text.x = element_text(angle = 90, hjust = 1))
+print(p)
+```
+
+***
+
+#Analiza zmian energii w czasie
+```{r, InteraktywnyWykres, fig.width=10, fig.height= 10,fig.show='animate',echo=TRUE}
+accumulate_by <- function(dat, var) {
+  var <- lazyeval::f_eval(var, dat)
+  lvls <- plotly:::getLevels(var)
+  dats <- lapply(seq_along(lvls), function(x) {
+    cbind(dat[var %in% lvls[seq(1, x)], ], frame = lvls[[x]])
+  })
+  dplyr::bind_rows(dats)
+}
+
+plot_data<-powerplants%>%group_by(id_jednostki,miesiac,rok)%>%mutate(kwh = sum(kwh))%>%ungroup()%>%mutate(data = rok +miesiac/12)
+plot_data<-distinct(select(plot_data,id_jednostki,kwh,data))
+plot_data<-arrange(plot_data,data)
+plot_data<- plot_data%>%accumulate_by(~data)
+
+
+p<- ggplot(plot_data,aes(x=data,y=factor(id_jednostki),frame=frame,color=kwh)) + geom_point(shape=15,size=7.6) + theme_bw() + xlab("Data") + ylab("Czujnik") + ggtitle("Zmiana energii w czasie dla ka¿dego  czujnika")
+p<-ggplotly(p)
+p
+
+```
+
+```{r SumaEnergiiWCzasie,echo=TRUE}
+plot_data<-powerplants%>%group_by(miesiac,rok)%>%mutate(kwh = sum(kwh))%>%ungroup()%>%mutate(data = rok +miesiac/12)
+plot_data<-distinct(select(plot_data,id_jednostki,kwh,data))
+plot_data<-arrange(plot_data,data)
+plot_data<- plot_data%>%accumulate_by(~data)
+
+p<- ggplot(plot_data,aes(x=data,y=kwh,frame=frame)) + geom_line(colour="#0066ff") + theme_bw() + xlab("Data") + ylab("Energia w kWh") + ggtitle("Zmiana energii w czasie")
+p<-ggplotly(p)
+p
+```
+
+Powy¿sze wykresy demonstruj¹ sposób zmian energii w czasie z granulacj¹ do miesi¹ca. Widaæ, ¿e miesi¹cach zimowych iloœæ produkowanej energii drastycznie maleje, a roœnie w miesi¹cach letnich.
+
+***
+
+#Energia dla ogniwa i lokalizacji
+
+Poni¿sze interkatywne wykresy pozwalaj¹ na podgl¹d iloœci wyprodukowanej energii przez poszczególne ogniwa fotowoltaiczne oraz w poszczególnej lokalizacji.
+
+```{r EnergiaWCzasieCzujniki, echo=TRUE}
+
+plot_data<-powerplants%>%group_by(id_jednostki,miesiac,rok)%>%mutate(kwh = sum(kwh))%>%ungroup()%>%mutate(data = rok +miesiac/12)
+plot_data<-distinct(select(plot_data,id_jednostki,kwh,data))
+plot_data<-arrange(plot_data,data)
+plot_data<- plot_data%>%accumulate_by(~data)
+
+updatemenus <- list(
+  list(
+    active = 0,
+    buttons = list(
+        list(
+        label = "Wszystkie",
+        method = "update",
+        args = list(list(visible = c(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE)))),
+      
+        list(
+        label = "Czujnik 1",
+        method = "update",
+        args = list(list(visible = c(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+    
+        list(
+        label = "Czujnik 2",
+        method = "update",
+        args = list(list(visible = c(FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 3",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 4",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 5",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 6",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 7",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 8",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 9",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 10",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 11",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 12",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 13",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 14",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 15",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE)))),
+      
+        list(
+        label = "Czujnik 16",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE)))),
+      
+        list(
+        label = "Czujnik 17",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE)))))
+  )
+)
+
+p<- ggplot(plot_data,aes(x=data,y=kwh,color=factor(id_jednostki))) + geom_line() + theme_bw()  + guides(color=FALSE) + xlab("Data") + ylab("Energia w kwh") + ggtitle("Sumaryczna iloœæ energii dla danego czujnika")
+p<-ggplotly(p)%>%layout(updatemenus=updatemenus)
+p
+
+```
+
+Trzy lokalizacje wyró¿niaj¹ siê, poniewa¿ znajduj¹ siê w nich po dwa ogniwa fotowoltaiczne, st¹d te¿ wysoka iloœæ wyprodukowanej energii.
+
+```{r SumaWCzasieLokalizacja,echo=TRUE}
+plot_data<-powerplants%>%group_by(id_lokalizacji,miesiac,rok)%>%mutate(kwh = sum(kwh))%>%ungroup()%>%mutate(data = rok +miesiac/12)
+plot_data<-distinct(select(plot_data,id_lokalizacji,kwh,data))
+plot_data<-arrange(plot_data,data)
+plot_data<- plot_data%>%accumulate_by(~data)
+
+updatemenus <- list(
+  list(
+    active = 0,
+    buttons = list(
+        list(
+        label = "Wszystkie",
+        method = "update",
+        args = list(list(visible = c(TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE, TRUE)))),
+      
+        list(
+        label = "Lok. 1",
+        method = "update",
+        args = list(list(visible = c(TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+    
+        list(
+        label = "Lok. 2",
+        method = "update",
+        args = list(list(visible = c(FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 3",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 4",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 5",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 6",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 7",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 8",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 9",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 10",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 11",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 12",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE)))),
+      
+        list(
+        label = "Lok. 13",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE)))),
+      
+        list(
+        label = "Lok. 14",
+        method = "update",
+        args = list(list(visible = c(FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE)))))
+  )
+)
+
+
+p<- ggplot(plot_data,aes(x=data,y=kwh,color=factor(id_lokalizacji) )) + geom_line() + theme_bw()  + guides(color=FALSE) + xlab("Data") + ylab("Energia w kwh") + ggtitle("Sumaryczna iloœæ energii dla danej lokalizacji")
+p<-ggplotly(p)%>%layout(updatemenus=updatemenus)
+p
+
+```
+
+***
+
+##Sumaryczna iloœæ energii dla danego ogniwa
+
+```{r SumaEnergiNaWszystkichCzujnikach,echo=TRUE}
+plot_data<-powerplants%>%group_by(id_jednostki)%>%mutate(kwh = sum(kwh))%>%ungroup()%>%arrange(id_jednostki)
+p<- ggplot(plot_data,aes(x=factor(id_jednostki),y=kwh)) + geom_col(aes(fill = factor(id_jednostki))) + theme_bw() + xlab("Czujnik") + ylab("Energia w kwh") + ggtitle("Sumaryczna iloœæ energii") + guides(fill=FALSE)
+p
+```
+
+***
+
+#Predykcja energii
+
+W celu stworzenia regresora przewiduj¹cego iloœæ wytwarznej energii podzielono dane na trzy kategorie: standardowe, wartoœci staystki Morana I, PCNM. Dla ka¿dej z tych kategorii stworzono regresor z wykorzystaniem metody *eXtreme Gradient Boosting*, która cechuje siê du¿¹ szybkoœci¹ dzia³ania dla du¿ej iloœci danych. Nastêpnie dla ka¿dego regresora wyznaczono 5 najwa¿niejszych atrybutów, które wykorzystywa³ i po³¹czono je w jeden zbiór i ponownie utworzono regresor. Na koniec podsumowano skutecznoœæ poszczególnych regresorów.
+
+***
+
+##Dane standardowe
+
+```{r PredykcjaDaneStandardowe,echo=TRUE}
+powerplants<-arrange(powerplants,data_format)
+standard_data_names<- colnames(powerplants%>%select(id_marki,id_lokalizacji,id_modelu,wiek_w_miesiacach,data_wartosc,godzina,dzien,miesiac,rok,temperatura_powietrza,naslonecznienie,cisnienie,predkosc_wiatru,wilgotnosc,punkt_rosy,kierunek_wiatru,zachmurzenie,dystans,azymut_slonca,wysokosc_slonca,naslonecznienie_pvgis,kwh))
+
+standard <- powerplants[,standard_data_names]
+inTraining_std <- createDataPartition(y = standard$kwh,p = .75, list = FALSE)
+training_std <- standard[ inTraining_std,]
+testing_std <- standard[ -inTraining_std,]
+ctrl_std <- trainControl(method="cv",number=2)
+fit_std<-train(kwh~.,data=training_std,method="xgbLinear",trControl = ctrl_std)
+
+```
+
+###Podsumowanie predykcji dane standardowe
+
+```{r PodsumowaniePredykcjiSTD,echo=TRUE}
+res_tst_std <- predict(fit_std,newdata = testing_std)
+v<-postResample(pred=res_tst_std,obs=testing_std$kwh)
+col_names <- names(v)
+names(v) <- names("")
+b_s<- data.frame()
+b_s<-rbind(b_s,v)
+colnames(b_s)<-col_names
+kable(b_s)
+
+#Test do Predykcji
+
+dane_std <- cbind(testing_std,res_tst_std)
+data_format <- as.POSIXct(testing_std$data_wartosc, origin = '1970-01-01')
+dane_std<-cbind(dane_std,data_format)
+p<-ggplot(dane_std,aes(x=data_format)) + geom_line(aes(y=kwh,color="Dane testowe")) + geom_line(aes(y=res_tst_std,color="Dane z predykcji")) + theme_bw() + ggtitle("Porównanie danych testowych z danymi z predykcji") + ylab("Energia w kWh") + xlab("Data")
+p<-ggplotly(p)%>%layout(xaxis=list(rangeslider=list(type="date")))
+p
+
+#Miesiecznie
+data_format_month <- format(as.POSIXct(testing_std$data_wartosc, origin = '1970-01-01'),'%Y-%m')
+dane_month<- cbind(dane_std,data_format_month)
+dane_month <- dane_month%>%group_by(data_format_month)%>%mutate(kwh=sum(kwh),res_tst_std=sum(res_tst_std))
+dane_month <- distinct(select(dane_month,data_format_month,kwh,res_tst_std))
+dane_month<-dane_month%>%ungroup()
+p<-ggplot(dane_month) + geom_col(aes(x=data_format_month,y=res_tst_std,color="1",fill="Dane z predykcji")) + geom_line(aes(x=as.numeric(data_format_month),y=kwh,color="2",fill="Dane testowe"),size=1) +theme_bw() + ggtitle("Porównanie danych testowych z danymi z predykcji w miesi¹cu") + ylab("Energia kWh") + xlab("Data")   + scale_color_manual(values=c("#0066ff", "#ff3333")) + scale_fill_manual(values=c("#ff3333","#0066ff")) + guides(color=FALSE) + geom_point(aes(x=as.numeric(data_format_month),y=kwh,color="2",fill="Dane testowe"),size=2) + guides(fill=guide_legend(title=NULL))
+p+theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+#Waznosc atrybutow
+var_imp_std<-varImp(fit_std)
+var_imp_std <- var_imp_std[["importance"]]
+var_imp_std<-cbind(var_imp_std,rownames(var_imp_std))
+colnames(var_imp_std)<-c("Waznosc","Atrybut")
+p<-ggplot(var_imp_std,aes(x=reorder(Atrybut,Waznosc),y=Waznosc)) + geom_col(aes(fill=Atrybut)) + coord_flip() + theme_bw() + xlab("Wa¿noœæ atrybutu") + ylab("")  + ggtitle("Wa¿noœæ atrybutów wykorzystanych w predykcji")+guides(fill=FALSE)
+p
+```
+
+***
+
+##Dane statystyki Morana I
+
+```{r PredykcjaDaneStatystykiI,echo=TRUE}
+moran_i_data_names <- colnames(powerplants%>%select(temperatura_powietrza_I,naslonecznienie_I,cisnienie_I,predkosc_wiatru_I,wilgotnosc_I,punkt_rosy_I,kierunek_wiatru_I,zachmurzenie_I,azymut_slonca_I,wysokosc_slonca_I,naslonecznienie_pvgis_I, id,id_marki,id_lokalizacji,id_modelu,wiek_w_miesiacach,data_wartosc,godzina,dzien,miesiac,rok,kwh))
+
+moran <- powerplants[,moran_i_data_names]
+inTraining_mor <- createDataPartition(y = moran$kwh,p = .75, list = FALSE)
+training_mor <- moran[ inTraining_mor,]
+testing_mor <- moran[ -inTraining_mor,]
+ctrl_mor <- trainControl(method="cv",number=2)
+fit_mor<-train(kwh~.,data=training_mor,method="xgbLinear",trControl = ctrl_mor)
+
+```
+
+###Podsumowanie danych statystyki Morana I
+
+```{r PodsumowanieMoranaI,echo=TRUE}
+res_tst_mor <- predict(fit_mor,newdata = testing_mor)
+v<-postResample(pred=res_tst_mor,obs=testing_mor$kwh)
+col_names <- names(v)
+names(v) <- names("")
+b_m<- data.frame()
+b_m<-rbind(b_m,v)
+colnames(b_m)<-col_names
+kable(b_m)
+
+#Test do Predykcji
+
+dane_mor <- cbind(testing_mor,res_tst_mor)
+data_format <- as.POSIXct(testing_mor$data_wartosc, origin = '1970-01-01')
+dane_mor<-cbind(dane_mor,data_format)
+p<-ggplot(dane_mor,aes(x=data_format)) + geom_line(aes(y=kwh,color="Dane testowe")) + geom_line(aes(y=res_tst_std,color="Dane z predykcji")) + theme_bw() + ggtitle("Porównanie danych testowych z danymi z predykcji") + ylab("Energia w kWh") + xlab("Data")
+p<-ggplotly(p)%>%layout(xaxis=list(rangeslider=list(type="date")))
+p
+
+#Miesiecznie
+data_format_month <- format(as.POSIXct(testing_mor$data_wartosc, origin = '1970-01-01'),'%Y-%m')
+dane_month<- cbind(dane_mor,data_format_month)
+dane_month <- dane_month%>%group_by(data_format_month)%>%mutate(kwh=sum(kwh),res_tst_mor=sum(res_tst_mor))
+dane_month <- distinct(select(dane_month,data_format_month,kwh,res_tst_mor))
+dane_month<-dane_month%>%ungroup()
+p<-ggplot(dane_month)+ geom_col(aes(x=data_format_month,y=res_tst_mor,color="1",fill="Dane z predykcji")) + geom_line(aes(x=as.numeric(data_format_month),y=kwh,color="2",fill="Dane testowe"),size=1) +theme_bw() + ggtitle("Porównanie danych testowych z danymi z predykcji w miesi¹cu") + ylab("Energia kWh") + xlab("Data")   + scale_color_manual(values=c("#0066ff", "#ff3333")) + scale_fill_manual(values=c("#ff3333","#0066ff")) + guides(color=FALSE) + geom_point(aes(x=as.numeric(data_format_month),y=kwh,color="2",fill="Dane testowe"),size=2) + guides(fill=guide_legend(title=NULL))
+p + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+#Waznosc atrybutow
+var_imp_mor<-varImp(fit_mor)
+var_imp_mor <- var_imp_mor[["importance"]]
+var_imp_mor<-cbind(var_imp_mor,rownames(var_imp_mor))
+colnames(var_imp_mor)<-c("Waznosc","Atrybut")
+p<-ggplot(var_imp_mor,aes(x=reorder(Atrybut,Waznosc),y=Waznosc)) + geom_col() + coord_flip()+ geom_col(aes(fill=Atrybut)) + coord_flip() + theme_bw() + xlab("Wa¿noœæ atrybutu") + ylab("")  + ggtitle("Wa¿noœæ atrybutów wykorzystanych w predykcji")+guides(fill=FALSE)
+p
+```
+
+***
+
+##Dane PCNM
+
+```{r PredykcjaDanePCNM, echo=TRUE}
+pcnm_data_names <- colnames(powerplants%>%select(id_marki,id_lokalizacji,id_modelu,wiek_w_miesiacach,data_wartosc,godzina,dzien,miesiac,rok,pcnm1,pcnm2,pcnm3,pcnm4,pcnm5,pcnm6,pcnm7,pcnm8,pcnm9,pcnm10,pcnm11,pcnm12,pcnm13,pcnm14,pcnm15,kwh))
+
+pcnm <- powerplants[,pcnm_data_names]
+inTraining_pcnm <- createDataPartition(y = pcnm$kwh,p = .75, list = FALSE)
+training_pcnm <- pcnm[ inTraining_pcnm,]
+testing_pcnm <- pcnm[ -inTraining_pcnm,]
+ctrl_pcnm <- trainControl(method="cv",number=2)
+fit_pcnm<-train(kwh~.,data=training_pcnm,method="xgbLinear",trControl = ctrl_pcnm)
+```
+
+###Podsumowanie PCNM
+
+```{r PodsumowaniePCNM,echo=TRUE}
+res_tst_pcnm <- predict(fit_pcnm,newdata = testing_pcnm)
+v<-postResample(pred=res_tst_pcnm,obs=testing_pcnm$kwh)
+col_names <- names(v)
+names(v) <- names("")
+b_p<- data.frame()
+b_p<-rbind(b_p,v)
+colnames(b_p)<-col_names
+kable(b_p)
+
+#Test do Predykcji
+
+dane_pcnm <- cbind(testing_pcnm,res_tst_pcnm)
+data_format <- as.POSIXct(testing_pcnm$data_wartosc, origin = '1970-01-01')
+dane_pcnm<-cbind(dane_pcnm,data_format)
+p<-ggplot(dane_pcnm,aes(x=data_format)) + geom_line(aes(y=kwh,color="Dane testowe")) + geom_line(aes(y=res_tst_std,color="Dane z predykcji")) + theme_bw() + ggtitle("Porównanie danych testowych z danymi z predykcji") + ylab("Energia w kWh") + xlab("Data")
+p<-ggplotly(p)%>%layout(xaxis=list(rangeslider=list(type="date")))
+p
+
+#Miesiecznie
+data_format_month <- format(as.POSIXct(testing_pcnm$data_wartosc, origin = '1970-01-01'),'%Y-%m')
+dane_month<- cbind(dane_pcnm,data_format_month)
+dane_month <- dane_month%>%group_by(data_format_month)%>%mutate(kwh=sum(kwh),res_tst_pcnm=sum(res_tst_pcnm))
+dane_month <- distinct(select(dane_month,data_format_month,kwh,res_tst_pcnm))
+dane_month<-dane_month%>%ungroup()
+p<-ggplot(dane_month) + geom_col(aes(x=data_format_month,y=res_tst_pcnm)) + geom_line(aes(x=as.numeric(data_format_month),y=kwh)) + geom_col(aes(x=data_format_month,y=res_tst_pcnm,color="1",fill="Dane z predykcji")) + geom_line(aes(x=as.numeric(data_format_month),y=kwh,color="2",fill="Dane testowe"),size=1) +theme_bw() + ggtitle("Porównanie danych testowych z danymi z predykcji w miesi¹cu") + ylab("Energia kWh") + xlab("Data")   + scale_color_manual(values=c("#0066ff", "#ff3333")) + scale_fill_manual(values=c("#ff3333","#0066ff")) + guides(color=FALSE) + geom_point(aes(x=as.numeric(data_format_month),y=kwh,color="2",fill="Dane testowe"),size=2) + guides(fill=guide_legend(title=NULL))
+p + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+#Waznosc atrybutow
+var_imp_pcnm<-varImp(fit_pcnm)
+var_imp_pcnm <- var_imp_pcnm[["importance"]]
+var_imp_pcnm<-cbind(var_imp_pcnm,rownames(var_imp_pcnm))
+colnames(var_imp_pcnm)<-c("Waznosc","Atrybut")
+p<-ggplot(var_imp_pcnm,aes(x=reorder(Atrybut,Waznosc),y=Waznosc)) + geom_col() + coord_flip()+ geom_col(aes(fill=Atrybut)) + coord_flip() + theme_bw() + xlab("Wa¿noœæ atrybutu") + ylab("")  + ggtitle("Wa¿noœæ atrybutów wykorzystanych w predykcji")+guides(fill=FALSE)
+p
+```
+
+***
+
+##Dane ³¹czone
+
+```{r PredykcjaDaneWszystkie, echo=TRUE}
+all <- powerplants%>%select(-id)%>%select(naslonecznienie,naslonecznienie_pvgis,data_wartosc,wilgotnosc,dystans,naslonecznienie_I,naslonecznienie_pvgis_I,azymut_slonca_I,godzina,miesiac,id_lokalizacji,dzien,kwh)
+inTraining_all <- createDataPartition(y = all$kwh,p = .75, list = FALSE)
+training_all <- all[ inTraining_all,]
+testing_all <- all[ -inTraining_all,]
+ctrl_all <- trainControl(method="cv",number=2)
+fit_all<-train(kwh~.,data=training_all,method="xgbLinear",trControl = ctrl_all)
+```
+
+###Dane ³¹czone
+
+```{r PodsumowanieAll,,echo=TRUE}
+res_tst_all <- predict(fit_all,newdata = testing_all)
+v<-postResample(pred=res_tst_all,obs=testing_all$kwh)
+col_names <- names(v)
+names(v) <- names("")
+b_a<- data.frame()
+b_a<-rbind(b_a,v)
+colnames(b_a)<-col_names
+kable(b_a)
+
+#Test do Predykcji
+
+dane_all <- cbind(testing_all,res_tst_all)
+data_format <- as.POSIXct(testing_all$data_wartosc, origin = '1970-01-01')
+dane_all<-cbind(dane_all,data_format)
+p<-ggplot(dane_all,aes(x=data_format)) + geom_line(aes(y=kwh,color="Dane testowe")) + geom_line(aes(y=res_tst_std,color="Dane z predykcji"))+ theme_bw() + ggtitle("Porównanie danych testowych z danymi z predykcji") + ylab("Energia w kWh") + xlab("Data")
+p<-ggplotly(p)%>%layout(xaxis=list(rangeslider=list(type="date")))
+p
+
+#Miesiecznie
+data_format_month <- format(as.POSIXct(testing_all$data_wartosc, origin = '1970-01-01'),'%Y-%m')
+dane_month<- cbind(dane_all,data_format_month)
+dane_month <- dane_month%>%group_by(data_format_month)%>%mutate(kwh=sum(kwh),res_tst_all=sum(res_tst_all))
+dane_month <- distinct(select(dane_month,data_format_month,kwh,res_tst_all))
+dane_month<-dane_month%>%ungroup()
+p<-ggplot(dane_month)+ geom_col(aes(x=data_format_month,y=res_tst_all)) + geom_line(aes(x=as.numeric(data_format_month),y=kwh)) + geom_col(aes(x=data_format_month,y=res_tst_all,color="1",fill="Dane z predykcji")) + geom_line(aes(x=as.numeric(data_format_month),y=kwh,color="2",fill="Dane testowe"),size=1) +theme_bw() + ggtitle("Porównanie danych testowych z danymi z predykcji w miesi¹cu") + ylab("Energia kWh") + xlab("Data")   + scale_color_manual(values=c("#0066ff", "#ff3333")) + scale_fill_manual(values=c("#ff3333","#0066ff")) + guides(color=FALSE) + geom_point(aes(x=as.numeric(data_format_month),y=kwh,color="2",fill="Dane testowe"),size=2) + guides(fill=guide_legend(title=NULL))
+p + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+#Waznosc atrybutow
+var_imp_all<-varImp(fit_all)
+var_imp_all <- var_imp_all[["importance"]]
+var_imp_all<-cbind(var_imp_all,rownames(var_imp_all))
+colnames(var_imp_all)<-c("Waznosc","Atrybut")
+p<-ggplot(var_imp_all,aes(x=reorder(Atrybut,Waznosc),y=Waznosc))  + geom_col() + coord_flip()+ geom_col(aes(fill=Atrybut)) + coord_flip() + theme_bw() + ylab("Wa¿noœæ atrybutu") + xlab("")  + ggtitle("Wa¿noœæ atrybutów wykorzystanych w predykcji")+guides(fill=FALSE)
+p
+```
+
+##Porównanie
+
+Najmniejsz¹ wartoœci¹ RMSE charakteryzuje siê regresor utworzony z wykorzystaniem danych standardowych. We wszystkich regresorach najwiêksz¹ rolê odgrywa³ atrybut dotycz¹cy nas³onecznienia. Przy danych PCNM najwiêksz¹ rolê odgrywa³y atrybutu wskazuj¹ce na datê i godzinê wykonania pomiaru.
+
+```{r PorownaniePredykcji,echo=TRUE,warning=FALSE,message=FALSE}
+b<-rbind(b_s,b_m,b_p,b_a)
+b<-cbind(b,Metoda=c("Standardowa","Statystyki Morana I","PCNM","Wszystkie"))
+p<-ggplot(b,aes(x=factor(Metoda),y=RMSE))+geom_col(aes(fill=Metoda,color=Metoda)) + theme_bw() + xlab("Atrybuty predykcji") + guides(fill=FALSE,color=FALSE) + ggtitle("Porównanie wartoœæi RMSE")
+p
+p<-ggplot(b,aes(x=factor(Metoda),y=Rsquared))+geom_col(aes(fill=Metoda,color=Metoda)) + theme_bw() + xlab("Atrybuty predykcji") + guides(fill=FALSE,color=FALSE) + ggtitle("Porównanie wartoœæi Rsquared")
+p
+p<-ggplot(b,aes(x=factor(Metoda),y=Metoda))+geom_col(aes(fill=Metoda,color=Metoda)) + theme_bw() + xlab("Atrybuty predykcji") + guides(fill=FALSE,color=FALSE) + ggtitle("Porównanie wartoœæi MAE")
+p
+```
+
+
+
